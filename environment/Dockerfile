@@ -15,4 +15,3 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-RUN touch /var/log/consumer.log && chmod 666 /var/log/consumer.log
