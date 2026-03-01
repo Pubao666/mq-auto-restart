@@ -1,12 +1,19 @@
 #!/bin/bash
 set -e
 
+# 安装依赖
 pip3 install redis --break-system-packages
 
-echo "1. 配置用户和安全隔离..."
+echo "1. 配置用户和专属日志目录..."
 useradd -M -s /bin/false mq-worker
-chown mq-worker:mq-worker /var/log/consumer.log
 
+# 创建专属日志目录并赋予权限，让普通用户拥有在这个目录下重建文件的能力
+mkdir -p /var/log/mq-consumer
+chown mq-worker:mq-worker /var/log/mq-consumer
+touch /var/log/mq-consumer/consumer.log
+chown mq-worker:mq-worker /var/log/mq-consumer/consumer.log
+
+# 生成高强度密码并按极致安全规范保存
 SECRET="Super$ecret$(date +%s)"
 echo "$SECRET" > /etc/redis_secret
 chmod 400 /etc/redis_secret
@@ -37,21 +44,23 @@ class HealthHandler(BaseHTTPRequestHandler):
         self.send_response(503)
         self.end_headers()
         self.wfile.write(b"Service Unavailable\n")
+
     def log_message(self, format, *args): pass
 
 def run_health_server():
     server = HTTPServer(('0.0.0.0', 8080), HealthHandler)
     server.serve_forever()
 
-def safe_write_log(task, max_retries=10):
-    log_file = '/var/log/consumer.log'
+def safe_write_log(task, max_retries=15):
+    log_file = '/var/log/mq-consumer/consumer.log'
     for _ in range(max_retries):
         try:
+            # 尝试追加写入，若文件不存在，且父目录有权限，open('a')会自动创建
             with open(log_file, 'a') as f:
                 f.write(task + '\n')
             return
         except (PermissionError, FileNotFoundError):
-            # 遭遇 logrotate，优雅等待权限恢复
+            # 捕获权限被剥夺或文件彻底丢失的极端情况，优雅退让等待恢复
             time.sleep(1)
     print(f"Failed to write log after retries: {task}", file=sys.stderr)
 
@@ -59,14 +68,15 @@ def main():
     global r_client
     redis_pass = os.environ.get('REDIS_PASS')
     r_client = redis.Redis(host='localhost', port=6379, password=redis_pass, decode_responses=True)
-    
+
     try:
         r_client.ping()
     except:
         sys.exit(1)
 
+    # 后台启动健康检查服务
     threading.Thread(target=run_health_server, daemon=True).start()
-    
+
     while True:
         try:
             result = r_client.blpop('task_queue', timeout=1)
@@ -92,6 +102,7 @@ startretries=3
 environment=PYTHONUNBUFFERED=1,REDIS_PASS="${SECRET}"
 EOF
 
+echo "5. 启动服务..."
 service supervisor start
 supervisorctl update
 supervisorctl start consumer || true
